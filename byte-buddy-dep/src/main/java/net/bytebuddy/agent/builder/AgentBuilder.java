@@ -8,10 +8,12 @@ import net.bytebuddy.description.field.FieldDescription;
 import net.bytebuddy.description.method.MethodDescription;
 import net.bytebuddy.description.method.ParameterDescription;
 import net.bytebuddy.description.modifier.*;
+import net.bytebuddy.description.module.ModuleDescription;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.dynamic.ClassFileLocator;
 import net.bytebuddy.dynamic.DynamicType;
 import net.bytebuddy.dynamic.loading.ClassInjector;
+import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.dynamic.loading.ClassReloadingStrategy;
 import net.bytebuddy.dynamic.scaffold.InstrumentedType;
 import net.bytebuddy.dynamic.scaffold.inline.MethodNameTransformer;
@@ -19,6 +21,7 @@ import net.bytebuddy.dynamic.scaffold.subclass.ConstructorStrategy;
 import net.bytebuddy.implementation.ExceptionMethod;
 import net.bytebuddy.implementation.Implementation;
 import net.bytebuddy.implementation.LoadedTypeInitializer;
+import net.bytebuddy.implementation.MethodCall;
 import net.bytebuddy.implementation.auxiliary.AuxiliaryType;
 import net.bytebuddy.implementation.bytecode.*;
 import net.bytebuddy.implementation.bytecode.assign.Assigner;
@@ -45,6 +48,7 @@ import java.lang.instrument.ClassDefinition;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.security.AccessControlContext;
@@ -4180,7 +4184,7 @@ public interface AgentBuilder {
 
         @Override
         public ClassFileTransformer makeRaw() {
-            return new ExecutingTransformer(byteBuddy,
+            return ExecutingTransformer.FACTORY.make(byteBuddy,
                     binaryLocator,
                     typeStrategy,
                     listener,
@@ -5135,6 +5139,41 @@ public interface AgentBuilder {
          */
         protected static class ExecutingTransformer implements ClassFileTransformer {
 
+            protected static final Factory FACTORY;
+
+            static {
+                Factory factory;
+                try {
+                    factory = new Factory.ForModernVm(new ByteBuddy()
+                            .subclass(ExecutingTransformer.class)
+                            .method(named("transform").and(takesArgument(0, ExecutingTransformer.class.getClassLoader().loadClass("java.lang.reflect.Module"))))
+                            .intercept(MethodCall.invoke(ExecutingTransformer.class.getDeclaredMethod("transform",
+                                    Object.class,
+                                    String.class,
+                                    Class.class,
+                                    ProtectionDomain.class,
+                                    byte[].class)).withThis().withArgument(0, 1, 2, 3, 4)) // TODO: Improve MethodCall API to allow resolution for multiple arguments (factory)
+                            .make()
+                            .load(ExecutingTransformer.class.getClassLoader(), ClassLoadingStrategy.Default.WRAPPER)
+                            .getLoaded()
+                            .getDeclaredConstructor(ByteBuddy.class,
+                                    BinaryLocator.class,
+                                    TypeStrategy.class,
+                                    Listener.class,
+                                    NativeMethodStrategy.class,
+                                    AccessControlContext.class,
+                                    InitializationStrategy.class,
+                                    BootstrapInjectionStrategy.class,
+                                    RawMatcher.class,
+                                    Transformation.class));
+                } catch (RuntimeException exception) {
+                    throw exception;
+                } catch (Exception ignored) {
+                    factory = Factory.ForPreJava9Vm.INSTANCE;
+                }
+                FACTORY = factory;
+            }
+
             /**
              * The Byte Buddy instance to be used.
              */
@@ -5199,16 +5238,16 @@ public interface AgentBuilder {
              * @param ignoredTypeMatcher         Identifies types that should not be instrumented.
              * @param transformation             The transformation object for handling type transformations.
              */
-            public ExecutingTransformer(ByteBuddy byteBuddy,
-                                        BinaryLocator binaryLocator,
-                                        TypeStrategy typeStrategy,
-                                        Listener listener,
-                                        NativeMethodStrategy nativeMethodStrategy,
-                                        AccessControlContext accessControlContext,
-                                        InitializationStrategy initializationStrategy,
-                                        BootstrapInjectionStrategy bootstrapInjectionStrategy,
-                                        RawMatcher ignoredTypeMatcher,
-                                        Transformation transformation) {
+            protected ExecutingTransformer(ByteBuddy byteBuddy,
+                                           BinaryLocator binaryLocator,
+                                           TypeStrategy typeStrategy,
+                                           Listener listener,
+                                           NativeMethodStrategy nativeMethodStrategy,
+                                           AccessControlContext accessControlContext,
+                                           InitializationStrategy initializationStrategy,
+                                           BootstrapInjectionStrategy bootstrapInjectionStrategy,
+                                           RawMatcher ignoredTypeMatcher,
+                                           Transformation transformation) {
                 this.byteBuddy = byteBuddy;
                 this.binaryLocator = binaryLocator;
                 this.typeStrategy = typeStrategy;
@@ -5227,6 +5266,46 @@ public interface AgentBuilder {
                                     Class<?> classBeingRedefined,
                                     ProtectionDomain protectionDomain,
                                     byte[] binaryRepresentation) {
+                return transform(classLoader,
+                        ModuleDescription.UNDEFINED,
+                        internalTypeName,
+                        classBeingRedefined,
+                        protectionDomain,
+                        binaryRepresentation);
+            }
+
+            protected byte[] transform(Object module,
+                                       String internalTypeName,
+                                       Class<?> classBeingRedefined,
+                                       ProtectionDomain protectionDomain,
+                                       byte[] binaryRepresentation) {
+                return transform(ModuleDescription.ForLoadedModule.DISPATCHER.getClassLoader(module), // TODO: Transform
+                        ModuleDescription.ForLoadedModule.of(module),
+                        internalTypeName,
+                        classBeingRedefined,
+                        protectionDomain,
+                        binaryRepresentation);
+            }
+
+            /**
+             * Applies a class file transformation.
+             *
+             * @param classLoader          The class loader that loads the transformed type. Maybe {@code null} for the bootstrap loader.
+             * @param moduleDescription    The description of the module that loads the transformed type.
+             *                             Maybe {@code null} if the current runtime does not support modules.
+             * @param internalTypeName     The internal name of the transformed type.
+             * @param classBeingRedefined  A loaded representation of a class being retransformed. This value is {@code null} if
+             *                             the current transformation is no retransformation.
+             * @param protectionDomain     The protection domain of the transformed type.
+             * @param binaryRepresentation The binary representation of the type's class file in its current form.
+             * @return The transformed class file or {@code null} if no transformation should be applied.
+             */
+            protected byte[] transform(ClassLoader classLoader,
+                                       ModuleDescription moduleDescription,
+                                       String internalTypeName,
+                                       Class<?> classBeingRedefined,
+                                       ProtectionDomain protectionDomain,
+                                       byte[] binaryRepresentation) {
                 if (internalTypeName == null) {
                     return NO_TRANSFORMATION;
                 }
@@ -5303,6 +5382,88 @@ public interface AgentBuilder {
                         ", ignoredTypeMatcher=" + ignoredTypeMatcher +
                         ", transformation=" + transformation +
                         '}';
+            }
+
+            protected interface Factory {
+
+                ClassFileTransformer make(ByteBuddy byteBuddy,
+                                          BinaryLocator binaryLocator,
+                                          TypeStrategy typeStrategy,
+                                          Listener listener,
+                                          NativeMethodStrategy nativeMethodStrategy,
+                                          AccessControlContext accessControlContext,
+                                          InitializationStrategy initializationStrategy,
+                                          BootstrapInjectionStrategy bootstrapInjectionStrategy,
+                                          RawMatcher ignoredTypeMatcher,
+                                          Transformation transformation);
+
+                enum ForPreJava9Vm implements Factory {
+
+                    INSTANCE;
+
+                    @Override
+                    public ClassFileTransformer make(ByteBuddy byteBuddy,
+                                                     BinaryLocator binaryLocator,
+                                                     TypeStrategy typeStrategy,
+                                                     Listener listener,
+                                                     NativeMethodStrategy nativeMethodStrategy,
+                                                     AccessControlContext accessControlContext,
+                                                     InitializationStrategy initializationStrategy,
+                                                     BootstrapInjectionStrategy bootstrapInjectionStrategy,
+                                                     RawMatcher ignoredTypeMatcher,
+                                                     Transformation transformation) {
+                        return new ExecutingTransformer(byteBuddy,
+                                binaryLocator,
+                                typeStrategy,
+                                listener,
+                                nativeMethodStrategy,
+                                accessControlContext,
+                                initializationStrategy,
+                                bootstrapInjectionStrategy,
+                                ignoredTypeMatcher,
+                                transformation);
+                    }
+                }
+
+                class ForModernVm implements Factory {
+
+                    private final Constructor<? extends ClassFileTransformer> constructor;
+
+                    protected ForModernVm(Constructor<? extends ClassFileTransformer> constructor) {
+                        this.constructor = constructor;
+                    }
+
+                    @Override
+                    public ClassFileTransformer make(ByteBuddy byteBuddy,
+                                                     BinaryLocator binaryLocator,
+                                                     TypeStrategy typeStrategy,
+                                                     Listener listener,
+                                                     NativeMethodStrategy nativeMethodStrategy,
+                                                     AccessControlContext accessControlContext,
+                                                     InitializationStrategy initializationStrategy,
+                                                     BootstrapInjectionStrategy bootstrapInjectionStrategy,
+                                                     RawMatcher ignoredTypeMatcher,
+                                                     Transformation transformation) {
+                        try {
+                            return constructor.newInstance(byteBuddy,
+                                    binaryLocator,
+                                    typeStrategy,
+                                    listener,
+                                    nativeMethodStrategy,
+                                    accessControlContext,
+                                    initializationStrategy,
+                                    bootstrapInjectionStrategy,
+                                    ignoredTypeMatcher,
+                                    transformation);
+                        } catch (IllegalAccessException exception) {
+                            throw new IllegalStateException("Could not access " + constructor, exception);
+                        } catch (InstantiationException exception) {
+                            throw new IllegalStateException("Could not instantiate " + constructor.getClass(), exception);
+                        } catch (InvocationTargetException exception) {
+                            throw new IllegalStateException("Error during invoking " + constructor, exception.getCause());
+                        }
+                    }
+                }
             }
         }
 
