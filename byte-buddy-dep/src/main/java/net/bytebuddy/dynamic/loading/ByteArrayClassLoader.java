@@ -178,11 +178,7 @@ public class ByteArrayClassLoader extends ClassLoader {
                 String packageName = name.substring(0, packageIndex);
                 PackageDefinitionStrategy.Definition definition = packageDefinitionStrategy.define(ByteArrayClassLoader.this, packageName, name);
                 if (definition.isDefined()) {
-<<<<<<< 21028c1465c82d69babdd9656168ea1b44fe7418
-                    @SuppressWarnings("deprecation")
-=======
-                    @SuppressWarnings("deprecation") // getDefinedPackage implicitly defines a package.
->>>>>>> Further refactorings to include Jigsaw APIs.
+                    @SuppressWarnings("deprecation") // Deprecated in Java 9 API but required behavior.
                     Package definedPackage = getPackage(packageName);
                     if (definedPackage == null) {
                         definePackage(packageName,
