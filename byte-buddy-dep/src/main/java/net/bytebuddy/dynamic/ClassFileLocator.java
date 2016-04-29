@@ -1,12 +1,16 @@
 package net.bytebuddy.dynamic;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import net.bytebuddy.utility.JavaType;
 import net.bytebuddy.utility.StreamDrainer;
 
 import java.io.*;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Module;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -332,6 +336,81 @@ public interface ClassFileLocator {
             return "ClassFileLocator.ForClassLoader{" +
                     "classLoader=" + classLoader +
                     '}';
+        }
+    }
+
+    class ForModule implements ClassFileLocator {
+
+        private static final Dispatcher DISPATCHER;
+
+        static {
+            Dispatcher dispatcher;
+            try {
+                dispatcher = new Dispatcher.Enabled(Class.forName("java.lang.reflect.Module").getDeclaredMethod("getResourceAsStream", String.class));
+            } catch (RuntimeException exception) {
+                throw exception;
+            } catch (Exception exception) {
+                dispatcher = Dispatcher.Disabled.INSTANCE;
+            }
+            DISPATCHER = dispatcher;
+        }
+
+        private final Object module;
+
+        public ForModule(Object module) {
+            if (!JavaType.MODULE.getTypeStub().isInstance(module)) {
+                throw new IllegalArgumentException("Not an instance of java.lang.reflect.Module: " + module);
+            }
+            this.module = module;
+        }
+
+        @Override
+        public Resolution locate(String typeName) throws IOException {
+            InputStream inputStream = DISPATCHER.getResourceAsStream(module, typeName.replace('.', '/') + CLASS_FILE_EXTENSION);
+            if (inputStream != null) {
+                try {
+                    return new Resolution.Explicit(StreamDrainer.DEFAULT.drain(inputStream));
+                } finally {
+                    inputStream.close();
+                }
+            } else {
+                return new Resolution.Illegal(typeName);
+            }
+        }
+
+        protected interface Dispatcher {
+
+            InputStream getResourceAsStream(Object module, String resource);
+
+            enum Disabled implements Dispatcher {
+
+                INSTANCE;
+
+                @Override
+                public InputStream getResourceAsStream(Object module, String resource) {
+                    throw new IllegalStateException("java.lang.reflect.Module is not supported on the current VM");
+                }
+            }
+
+            class Enabled implements Dispatcher {
+
+                private final Method getResourceAsStream;
+
+                protected Enabled(Method getResourceAsStream) {
+                    this.getResourceAsStream = getResourceAsStream;
+                }
+
+                @Override
+                public InputStream getResourceAsStream(Object module, String resource) {
+                    try {
+                        return (InputStream) getResourceAsStream.invoke(module, resource);
+                    } catch (InvocationTargetException exception) {
+                        throw new IllegalStateException("Could not access " + getResourceAsStream, exception);
+                    } catch (IllegalAccessException exception) {
+                        throw new IllegalStateException("Error invoking " + getResourceAsStream, exception.getCause());
+                    }
+                }
+            }
         }
     }
 

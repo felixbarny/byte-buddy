@@ -5,7 +5,6 @@ import net.bytebuddy.utility.JavaType;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Module;
 
 public interface ModuleDescription extends NamedElement.WithRuntimeName {
 
@@ -43,6 +42,10 @@ public interface ModuleDescription extends NamedElement.WithRuntimeName {
             return new ForLoadedModule(module);
         }
 
+        public static ModuleDescription describeModuleOf(Class<?> type) {
+            return new ForLoadedModule(DISPATCHER.describeModuleOf(type));
+        }
+
         @Override
         public boolean isNamed() {
             return DISPATCHER.isNamed(module);
@@ -59,6 +62,8 @@ public interface ModuleDescription extends NamedElement.WithRuntimeName {
 
             String getName(Object module);
 
+            ModuleDescription describeModuleOf(Class<?> type);
+
             enum Disabled implements Dispatcher {
 
                 INSTANCE;
@@ -72,6 +77,11 @@ public interface ModuleDescription extends NamedElement.WithRuntimeName {
                 public String getName(Object module) {
                     throw new IllegalStateException("java.lang.reflect.Module is not available on the current VM");
                 }
+
+                @Override
+                public ModuleDescription describeModuleOf(Class<?> type) {
+                    return UNDEFINED;
+                }
             }
 
             class Enabled implements Dispatcher {
@@ -80,15 +90,20 @@ public interface ModuleDescription extends NamedElement.WithRuntimeName {
 
                 private final Method getName;
 
-                protected Enabled(Method isNamed, Method getName) {
+                private final Method getModule;
+
+                protected Enabled(Method isNamed, Method getName, Method getModule) {
                     this.isNamed = isNamed;
                     this.getName = getName;
+                    this.getModule = getModule;
                 }
 
                 protected static Dispatcher make() {
                     try {
                         Class<?> module = Class.forName("java.lang.reflect.Module");
-                        return new Enabled(module.getDeclaredMethod("isNamed"), module.getDeclaredMethod("getName"));
+                        return new Enabled(module.getDeclaredMethod("isNamed"),
+                                module.getDeclaredMethod("getName"),
+                                Class.class.getDeclaredMethod("getModule"));
                     } catch (RuntimeException exception) {
                         throw exception;
                     } catch (Exception ignored) {
@@ -115,6 +130,17 @@ public interface ModuleDescription extends NamedElement.WithRuntimeName {
                         throw new IllegalStateException("Cannot access " + getName, exception);
                     } catch (InvocationTargetException exception) {
                         throw new IllegalStateException("Error while invoking " + getName, exception.getCause());
+                    }
+                }
+
+                @Override
+                public ModuleDescription describeModuleOf(Class<?> type) {
+                    try {
+                        return ForLoadedModule.of(getModule.invoke(type));
+                    } catch (IllegalAccessException exception) {
+                        throw new IllegalStateException("Cannot access " + getModule, exception);
+                    } catch (InvocationTargetException exception) {
+                        throw new IllegalStateException("Error while invoking " + getModule, exception.getCause());
                     }
                 }
             }
