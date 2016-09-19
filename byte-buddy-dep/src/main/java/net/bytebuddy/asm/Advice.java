@@ -135,9 +135,6 @@ public class Advice implements AsmVisitorWrapper.ForDeclaredMethods.MethodVisito
      */
     private static final MethodDescription.InDefinedShape PREPEND_LINE_NUMBER;
 
-    /**
-     * A reference to the {@link OnMethodEnter#skipOn()} method.
-     */
     private static final MethodDescription.InDefinedShape SKIP_ON;
 
     /**
@@ -4627,7 +4624,7 @@ public class Advice implements AsmVisitorWrapper.ForDeclaredMethods.MethodVisito
                 @Override
                 public Target resolve(MethodDescription.InDefinedShape instrumentedMethod, Context context) {
                     if (!readOnly && !instrumentedMethod.getReturnType().asErasure().equals(targetType)) {
-                        throw new IllegalStateException("read-only return type of " + instrumentedMethod + " is not equal to " + targetType);
+                        throw new IllegalStateException("Non read-only return type of " + instrumentedMethod + " is not equal to " + targetType);
                     } else if (readOnly && !instrumentedMethod.getReturnType().asErasure().isAssignableTo(targetType)) {
                         throw new IllegalStateException("Cannot assign return type of " + instrumentedMethod + " to " + targetType);
                     }
